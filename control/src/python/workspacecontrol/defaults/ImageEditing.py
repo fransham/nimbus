@@ -426,14 +426,27 @@ class DefaultImageEditing:
     def _doOneMountCopyTask(self, imagepath, src, dst, mntpath, hdimage):
 
         if not hdimage:
-            cmd = "%s %s one %s %s %s %s" % (self.sudo_path, self.mounttool_path, imagepath, mntpath, src, dst)
+	    cmd = "%s %s one %s %s %s %s" % (self.sudo_path, self.mounttool_path, imagepath, mntpath, src, dst)
             error = self._doOneMountCopyInnerTask(src, cmd)
+
             if error:
                 raise error
             else:
                 return
 
-        # Some hard disk formats actually mount like partitions, for example
+        f = open(imagepath, 'r')
+        magic = f.read(3)
+        f.close()
+        if magic == "QFI":
+            # Mounting the partition as a QCOW image
+            cmd = "%s %s qcowone %s %s %s %s" % (self.sudo_path, self.mounttool_path, imagepath, mntpath, src, dst)
+            error = self._doOneMountCopyInnerTask(src, cmd)
+	    if error:
+		raise error
+	    else:
+		return
+        
+	# Some hard disk formats actually mount like partitions, for example
         # the KVM 'raw' format.  We attempt to do partition like mounting
         # first and then if that fails, try the full blown fdisk + mount
         # mechanism.

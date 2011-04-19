@@ -167,7 +167,9 @@ class Disk:
             # file is ignored at the moment
             if self.driver == "tap:aio":
                 x.write(L(3, "<driver name='tap' type='aio' />"))
-        
+	    elif self.driver == "qcow2":
+		x.write(L(3, "<driver name='qemu' type='qcow2' />"))
+	x.write(L(3, "<driver name='qemu' type='qcow2' />"))        
         if self._type == "block":
             x.write(L(3, "<source dev='%s' />" % self.source))
         else:
@@ -203,6 +205,9 @@ class Interface:
         
         x.write(L(3, "<source bridge='%s' />" % self.source))
         x.write(L(3, "<mac address='%s' />" % self.mac))
+	self.model_type='virtio'
+        x.write(L(3, "<model type='%s'/>" % self.model_type))
+
         
         if self.target:
             x.write(L(3, "<target dev='%s' />" % self.target))

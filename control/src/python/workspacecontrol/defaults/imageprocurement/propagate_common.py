@@ -14,6 +14,7 @@ from propagate_adapter import PropagationAdapter
 
 # keywords for 'adapters' dict as well as the expected URL schemes
 PROP_ADAPTER_SCP = "scp"
+PROP_ADAPTER_QCOW = "qcow"
 PROP_ADAPTER_GUC = "gsiftp"
 PROP_ADAPTER_HDFS = "hdfs"
 PROP_ADAPTER_HTTP = "http"
@@ -56,6 +57,17 @@ class DefaultImageProcurement:
         
         self.adapters = {}
         
+        qcow_create_path = self.p.get_conf_or_none("propagation", "qcow_create")
+        if qcow_create_path:
+            try:
+                import propagate_qcow
+                self.adapters[PROP_ADAPTER_QCOW] = propagate_qcow.propadapter(self.p, self.c)
+            except:
+                msg = "QCOW configuration present (propagation->qcow_create) but cannot load a suitable QCOW implementation in the code"
+                self.c.log.exception(msg + ": ")
+                raise InvalidConfig(msg)
+
+
         scp_path = self.p.get_conf_or_none("propagation", "scp")
         if scp_path:
             try:
@@ -726,7 +738,10 @@ class DefaultImageProcurement:
                 # object is returned by the module, it is assumed to exist
                 lf.path = self._derive_instance_dir()
                 lf.path = os.path.join(lf.path, local_filename)
-                    
+                
+                if keyword == PROP_ADAPTER_QCOW:
+                    adapter.backing_image = os.path.join(self.localdir, local_filename)
+    
                 pathexists = os.path.exists(lf.path)
                 if pathexists and lf._propagate_needed:
                     raise InvalidInput("file is going to be transferred to this host but the target exists already: '%s'" % lf.path)

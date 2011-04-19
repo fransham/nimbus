@@ -41,12 +41,17 @@ IFS=' '
 
 \unalias -a
 
-set -f -u -C -p -P
+set -f -e -u -C -p -P
 
 # set:
 #
 # -f  
 #     Disable file name generation (globbing).
+# -e  
+#     Exit immediately if a simple command (see section Simple Commands)
+#     exits with a non-zero status, unless the command that fails is part
+#     of an until or while loop, part of an if statement, part of a && or
+#     || list, or if the command's return status is being inverted using !
 # -u  
 #     Treat unset variables as an error when performing parameter expansion.
 #     An error message will be written to the standard error, and a
@@ -70,7 +75,7 @@ set -f -u -C -p -P
 #     instead. By default, Bash follows the logical chain of directories
 #     when performing commands which change the current directory.
 
-PATH=/bin
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
 SHELL=/bin/bash
 export PATH SHELL
 
@@ -82,6 +87,8 @@ function strlen (){
 MOUNT="/bin/mount"
 UMOUNT="/bin/umount"
 CP="/bin/cp"
+QEMU_NBD="/usr/bin/qemu-nbd"
+KPARTX="/sbin/kpartx"
 
 FLOCKFILE=/opt/nimbus/var/workspace-control/lock/loopback.lock
 FLOCK=/usr/bin/flock
@@ -146,6 +153,8 @@ elif [ "$subcommand" = "one" ]; then
   subcommand="ONE"
 elif [ "$subcommand" = "hdone" ]; then
   subcommand="HDONE"
+elif [ "$subcommand" = "qcowone" ]; then
+  subcommand="QCOWONE"
 else
   echo "invalid subcommand"
   exit 1
@@ -186,6 +195,17 @@ elif [ "$subcommand" = "HDONE" ]; then
   sourcefiles="$datafile"
   targetfiles="$datatarget"
   
+elif [ "$subcommand" = "QCOWONE" ]; then
+  if [ $# -ne 5 ]; then
+    echo "qcowone subcommand requires 5 and only 5 arguments: one <imagefile> <mntpoint> <datafile> <datatarget>"
+    exit 1
+  fi
+  echo "  - datafile: $datafile"
+  echo "  - datatarget: $datatarget"
+
+  sourcefiles="$datafile"
+  targetfiles="$datatarget"
+
 else
   echo "??"
   exit 64
@@ -301,6 +321,45 @@ do
   echo "  - target OK: $y"
 done
 
+
+######################
+# QCOW IMAGE CLEANUP #
+######################
+# we need this function to disconnect the nbd device in the event of a 
+# failure somewhere in the kpartx or mount commands.
+function qcow_cleanup() {
+  # delete the mapping
+  cmd="$KPARTX -d /dev/$1"
+  echo "command = $cmd"
+  if [ "$DRYRUN" != "true" ]; then
+    ( $cmd )
+    if [ $? -ne 0 ]; then
+      echo "Problem with kpartx -d"
+      # kpartx will print to stderr
+      # don't exit here, so since we still have to undo qemu-img
+    else
+      echo "  - successful"
+    fi
+  fi
+
+  #disconnect from nbd
+  cmd="$QEMU_NBD -d /dev/$1"
+  echo "command = $cmd"
+  if [ "$DRYRUN" != "true" ]; then
+    ( $cmd )
+    if [ $? -ne 0 ]; then
+      echo "qemu-nbd failed to disconnect"
+    else
+      echo "  - successful"
+    fi
+  fi
+
+  # make sure the lockfile is gone... this can stick around if there are problems
+  if [ -e "/var/lock/qemu-nbd-$1" ]; then
+	rm -f /var/lock/qemu-nbd-$1
+  fi
+}
+
 ###############
 # ALTER IMAGE #
 ###############
@@ -312,10 +371,62 @@ echo ""
 echo "Altering image (dryrun = $DRYRUN):"
 echo ""
 
+if [ ! -f $imagefile ]; then
+  echo "*** can not find image file $imagefile, exiting"
+  exit 1
+fi
+
+if [ "$subcommand" = "QCOWONE" ]; then
+  
+  # find free nbd device
+  found="";
+  nbd=""
+  for i in `find /dev/ -name "nbd*"`
+  do
+    nbd=`basename $i`
+    if [ ! -e "/var/lock/qemu-nbd-$nbd" ]; then
+	found=1
+	break
+    fi
+  done
+  if [ -z "$found" ]; then
+    echo "No free nbd device found.  Try modprobe nbd."
+    exit 67
+  fi
+
+  cmd="$QEMU_NBD -c /dev/$nbd $imagefile"
+  echo "command = $cmd"
+  if [ "$DRYRUN" != "true" ]; then
+    ( $cmd )
+    if [ $? -ne 0 ]; then
+      echo "qemu-nbd failed to connect"
+      exit 5
+    else
+      echo "  - successful"
+    fi
+  fi
+
+  cmd="$KPARTX -av /dev/$nbd"
+  echo "command = $cmd"
+  if [ "$DRYRUN" != "true" ]; then
+    ( $cmd )
+    if [ $? -ne 0 ]; then
+      # kpartx will print to stderr
+      qcow_cleanup $nbd
+      exit 5
+    else
+      echo "  - successful"
+    fi
+  fi
+fi
+
+
 if [ "$subcommand" = "ONE" ]; then
   cmd="$MOUNT -o loop,noexec,nosuid,nodev,noatime,sync $imagefile $mountpoint"
 elif [ "$subcommand" = "HDONE" ]; then
   cmd="$MOUNT -o loop,noexec,nosuid,nodev,noatime,sync,offset=$offsetint $imagefile $mountpoint"
+elif [ "$subcommand" = "QCOWONE" ]; then
+  cmd="$MOUNT /dev/mapper/${nbd}p1 $mountpoint"
 else
   echo "??"
   exit 65
@@ -326,6 +437,9 @@ if [ "$DRYRUN" != "true" ]; then
   ( $cmd )
   if [ $? -ne 0 ]; then
     # mount will print to stderr
+    if [ "$subcommand" = "QCOWONE" ]; then
+	qcow_cleanup $nbd
+    fi
     exit 5
   else
     echo "  - successful"
@@ -337,6 +451,8 @@ problem="false"
 if [ "$subcommand" = "ONE" ]; then
   cmd="$CP $datafile $mountpoint/$datatarget"
 elif [ "$subcommand" = "HDONE" ]; then
+  cmd="$CP $datafile $mountpoint/$datatarget"
+elif [ "$subcommand" = "QCOWONE" ]; then
   cmd="$CP $datafile $mountpoint/$datatarget"
 else
   echo "??"
@@ -360,6 +476,9 @@ if [ "$DRYRUN" != "true" ]; then
   ( $cmd )
   if [ $? -ne 0 ]; then
     # umount will print to stderr
+    if [ "$subcommand" = "QCOWONE" ]; then
+        qcow_cleanup $nbd
+    fi
     exit 6
   else
     echo "  - successful"
@@ -368,6 +487,11 @@ if [ "$DRYRUN" != "true" ]; then
       exit 7
     fi
   fi
+fi
+
+
+if [ "$subcommand" = "QCOWONE" ]; then
+  qcow_cleanup $nbd
 fi
 
 ) 200<$FLOCKFILE
